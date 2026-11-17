@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WellWatch · Early warnings for desert wells</title>
+<style>
+  :root{--bg:#1b1410;--card:#2a1f17;--ink:#f4e9d8;--mute:#b9a88f;--ok:#6fbf73;--watch:#e8b04a;--warn:#e5604d;--line:#4a3a2b;--accent:#e8b04a}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif}
+  header{padding:18px 20px;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:22px} h1 span{color:var(--accent)}
+  header p{margin:4px 0 0;color:var(--mute);font-size:13px}
+  main{display:grid;gap:16px;padding:16px;max-width:1100px;margin:auto;grid-template-columns:1fr}
+  @media(min-width:900px){main{grid-template-columns:1.6fr 1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .card h2{margin:0 0 10px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute)}
+  .wells{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  .wells button{flex:1;min-width:120px;background:#1b1410;border:1px solid var(--line);color:var(--ink);padding:9px;border-radius:8px;cursor:pointer;text-align:left}
+  .wells button.sel{border-color:var(--accent)}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+  canvas{width:100%;height:300px;background:#1b1410;border-radius:8px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
+  label.tog{display:flex;align-items:center;gap:6px;background:#1b1410;border:1px solid var(--line);padding:7px 10px;border-radius:8px;cursor:pointer;font-size:13px}
+  .big{font-size:30px;font-weight:700}
+  .status{display:inline-block;padding:3px 10px;border-radius:99px;font-weight:700;font-size:13px;color:#1b1410}
+  .kv{display:flex;justify-content:space-between;border-bottom:1px dashed var(--line);padding:5px 0;font-size:14px}
+  .kv span:first-child{color:var(--mute)}
+  input[type=range]{width:100%}
+  .phone{background:#0e0b08;border:3px solid #55432f;border-radius:22px;padding:14px;max-width:340px;margin:auto}
+  .bubble{background:#34281d;border-radius:14px 14px 14px 4px;padding:10px 12px;margin:8px 0;white-space:pre-wrap;font-size:14px}
+  .bubble.ar{direction:rtl;text-align:right;border-radius:14px 14px 4px 14px}
+  .small{font-size:12px;color:var(--mute)}
+  button.act{background:var(--accent);color:#1b1410;border:0;border-radius:8px;padding:8px 12px;font-weight:700;cursor:pointer}
+  button.act.off{background:#1b1410;color:var(--ink);border:1px solid var(--line)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Well<span>Watch</span> · early warnings for desert wells</h1>
+  <p>Warns a village council weeks before a well runs dry, by plain SMS. Demo data is <b>simulated</b> (rainfall, vegetation index and well-level sensors), shaped like a Sahel/Arabian-fringe dry season.</p>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <h2>1 · Pick a well</h2>
+      <div class="wells" id="wells"></div>
+      <canvas id="chart" width="900" height="380"></canvas>
+      <div class="small" id="legend">Line = water column above pump (m). Shaded = 80% confidence band. Red line = pump runs dry.</div>
+      <div class="row">
+        <label class="tog"><input type="checkbox" id="deadSensor"> Sensor died (last 14 days missing)</label>
+        <label class="tog"><input type="checkbox" id="cloudy"> Satellite cloudy (no vegetation reading)</label>
+        <button class="act off" id="report">Herder SMS: "water is low"</button>
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h2>2 · False alarm vs missed alarm</h2>
+      <input type="range" id="thr" min="5" max="80" value="30">
+      <div class="kv"><span>Warn when chance of running dry within 21 days is above</span><b id="thrv"></b></div>
+      <div class="small">Lower = warns earlier, more false alarms (trust cost). Higher = fewer false alarms, more missed wells (lives cost). Wells in dry spells are warned at a lower bar than usual because a miss is worse than a false alarm.</div>
+    </div>
+  </section>
+  <section>
+    <div class="card">
+      <h2>3 · Prediction</h2>
+      <div><span class="status" id="status"></span></div>
+      <div class="big" id="days"></div>
+      <div class="small" id="range"></div>
+      <div class="kv"><span>Chance dry within 21 days</span><b id="prob"></b></div>
+      <div class="kv"><span>Confidence in this prediction</span><b id="conf"></b></div>
+      <div class="kv"><span>Data used</span><b id="used"></b></div>
+      <div class="kv"><span>Vegetation (NDVI) trend, 30d</span><b id="ndvi"></b></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h2>4 · Warning sent</h2>
+      <div class="phone">
+        <div class="small">SMS · Village council &amp; herders</div>
+        <div class="bubble" id="smsEn"></div>
+        <div class="bubble ar" id="smsAr"></div>
+      </div>
+      <div class="small" style="margin-top:8px">Works on a basic phone: 2 short SMS, no app or data needed. Reply 1 to report low water; replies feed the model.</div>
+    </div>
+  </section>
+</main>
+
+<script>
+/* ===== MODEL (pure functions) ===== */
+function mulberry(seed){return function(){seed|=0;seed=seed+0x6D2B79F5|0;let t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function gauss(r){return Math.sqrt(-2*Math.log(r()+1e-12))*Math.cos(2*Math.PI*r())}
+function normCdf(z){const t=1/(1+0.2316419*Math.abs(z));const d=0.3989423*Math.exp(-z*z/2);let p=d*t*(0.3193815+t*(-0.3565638+t*(1.781478+t*(-1.821256+t*1.330274))));return z>0?1-p:p}
+
+const N=90, TODAY=N-1, DRY=0.5, HORIZON=21;
+const WELL_DEFS=[
+  {id:0,name:'Al Rawda well',seed:11,start:5.9,slope:-0.050,noise:0.14,ndvi0:0.28,ndviSlope:-0.0020},
+  {id:1,name:'Wadi Hamra well',seed:22,start:5.0,slope:-0.012,noise:0.12,ndvi0:0.34,ndviSlope:-0.0004},
+  {id:2,name:'Umm Sidr well',seed:33,start:5.0,slope:-0.037,noise:0.14,ndvi0:0.25,ndviSlope:-0.0022}
+];
+function simulate(def){
+  const r=mulberry(def.seed), level=[], rain=[], ndvi=[];
+  let lv=def.start;
+  for(let i=0;i<N;i++){
+    const storm=r()<0.025?10+r()*14:0;            // rare rain event, mm (CHIRPS-like)
+    rain.push(storm);
+    lv+=def.slope+storm*0.004;                     // slow drawdown + small recharge
+    level.push(Math.max(0.05,lv+gauss(r)*def.noise));
+    ndvi.push(def.ndvi0+def.ndviSlope*i+storm*0.0015+gauss(r)*0.008);
+  }
+  return {def,level,rain,ndvi};
+}
+function regress(xs,ys){
+  const n=xs.length, xb=xs.reduce((a,b)=>a+b)/n, yb=ys.reduce((a,b)=>a+b)/n;
+  let sxx=0,sxy=0; for(let i=0;i<n;i++){sxx+=(xs[i]-xb)**2; sxy+=(xs[i]-xb)*(ys[i]-yb);}
+  const b=sxy/sxx, a=yb-b*xb; let sse=0; for(let i=0;i<n;i++) sse+=(ys[i]-(a+b*xs[i]))**2;
+  const s=Math.sqrt(sse/Math.max(1,n-2));
+  return {a,b,s,n,xb,sxx,seB:s/Math.sqrt(sxx)};
+}
+/* Predict level at day x: mean and sd (proper regression prediction interval). */
+function predictAt(m,x){return {mean:m.a+m.b*x, sd:m.s*Math.sqrt(1+1/m.n+((x-m.xb)**2)/m.sxx)}}
+
+function analyse(w,opts){
+  const lastValid = opts.dead ? TODAY-14 : TODAY;
+  const WIN=30, xs=[], ys=[];
+  for(let i=Math.max(0,lastValid-WIN+1);i<=lastValid;i++){xs.push(i);ys.push(w.level[i]);}
+  const m=regress(xs,ys);
+  // NDVI trend (satellite proxy) – unavailable when cloudy
+  let ndviTrend=null;
+  if(!opts.cloudy){const nx=[],ny=[];for(let i=TODAY-29;i<=TODAY;i++){nx.push(i);ny.push(w.ndvi[i]);} ndviTrend=regress(nx,ny).b*30;}
+  const x21=TODAY+HORIZON;
+  let p=predictAt(m,x21);
+  let mean=p.mean, sd=p.sd, used=opts.dead?'Last good sensor reading + extrapolation':'Daily sensor (30-day fit)';
+  // Herder report: independent evidence that level today is ~1.0 m (+/-0.6). Inverse-variance fusion.
+  if(opts.report){
+    const m2=1.0+m.b*HORIZON, sd2=Math.sqrt(0.6**2+(HORIZON*m.seB)**2);
+    const w1=1/(sd*sd), w2=1/(sd2*sd2);
+    mean=(mean*w1+m2*w2)/(w1+w2); sd=Math.sqrt(1/(w1+w2));
+    used+=' + herder report';
+  }
+  // Satellite stress nudge: strongly falling NDVI means vegetation (and water table) stress -> shift mean down
+  if(ndviTrend!==null && ndviTrend<-0.04){mean-=0.15*Math.min(1,Math.abs(ndviTrend)/0.1); used+=' + vegetation trend';}
+  if(opts.cloudy) used+=' (no satellite: cloudy)';
+  const pDry=normCdf((DRY-mean)/sd);
+  // days left from today
+  const cur=predictAt(m,TODAY).mean;
+  const daysAt=b=>b<-1e-4?Math.max(0,(cur-DRY)/(-b)):Infinity;
+  const cap=d=>d>120?Infinity:d;
+  const med=cap(daysAt(m.b)), fast=cap(daysAt(m.b-1.28*m.seB)), slow=cap(daysAt(m.b+1.28*m.seB));
+  // confidence label
+  const sdRel=sd/Math.max(0.5,cur);
+  let conf='High';
+  if(opts.dead&&opts.cloudy&&!opts.report) conf='Low – ask herders';
+  else if(opts.dead||sdRel>0.5) conf='Medium';
+  return {m,lastValid,mean,sd,pDry,med,fast,slow,used,conf,ndviTrend,cur,opts};
+}
+function levelBand(r,x){const p=predictAt(r.m,x);return p}
+function tierFor(pDry,thr){return pDry>=thr?'WARN':(pDry>=thr/2?'WATCH':'OK')}
+
+/* ===== UI ===== */
+const wells=WELL_DEFS.map(simulate);
+let sel=0;
+const $=id=>document.getElementById(id);
+const colors={OK:'var(--ok)',WATCH:'var(--watch)',WARN:'var(--warn)'};
+function opts(){return{dead:$('deadSensor').checked,cloudy:$('cloudy').checked,report:$('report').classList.contains('on')}}
+function fmtDays(d){return d===Infinity?'stable':Math.round(d)}
+function thrValue(){return parseInt($('thr').value)/100}
+
+function bestAlternative(results){
+  let best=null;
+  results.forEach((r,i)=>{ if(i===sel) return; if(!best||r.med>best.r.med) best={r,i}; });
+  return best;
+}
+function render(){
+  const o=opts(), thr=thrValue();
+  $('thrv').textContent=Math.round(thr*100)+'%';
+  const results=wells.map(w=>analyse(w,o));
+  // well buttons
+  $('wells').innerHTML=wells.map((w,i)=>{
+    const t=tierFor(results[i].pDry,thr);
+    return `<button class="${i===sel?'sel':''}" data-i="${i}"><span class="dot" style="background:${colors[t]}"></span><b>${w.def.name}</b><br><span class="small">${t} · ${fmtDays(results[i].med)==='stable'?'stable':fmtDays(results[i].med)+' days left'}</span></button>`;
+  }).join('');
+  document.querySelectorAll('#wells button').forEach(b=>b.onclick=()=>{sel=+b.dataset.i;render()});
+  const r=results[sel], w=wells[sel], t=tierFor(r.pDry,thr);
+  const st=$('status'); st.textContent=t==='WARN'?'WARNING – ACT NOW':(t==='WATCH'?'WATCH':'OK'); st.style.background=colors[t];
+  $('days').textContent=r.med===Infinity?'Stable – no decline':`~${fmtDays(r.med)} days until dry`;
+  $('range').textContent=r.med===Infinity?'':`80% range: ${fmtDays(r.fast)}–${r.slow===Infinity?'60+':fmtDays(r.slow)} days`;
+  $('prob').textContent=Math.round(r.pDry*100)+'%';
+  $('conf').textContent=r.conf;
+  $('used').textContent=r.used;
+  $('ndvi').textContent=r.ndviTrend===null?'unavailable (cloud)':(r.ndviTrend>=0?'+':'')+r.ndviTrend.toFixed(3);
+  // SMS
+  const alt=bestAlternative(results), altName=alt?wells[alt.i].def.name:'';
+  const altDays=alt?fmtDays(alt.r.med):'';
+  const dEn=r.med===Infinity?'no sign of drying':`about ${fmtDays(r.med)} days (${fmtDays(r.fast)}-${r.slow===Infinity?'60+':fmtDays(r.slow)})`;
+  const dAr=r.med===Infinity?'لا توجد مؤشرات على الجفاف':`حوالي ${fmtDays(r.med)} يومًا`;
+  let en,ar;
+  if(t==='WARN'){
+    en=`WELL WARNING: ${w.def.name} may run dry in ${dEn}. Chance: ${Math.round(r.pDry*100)}%.\nACTION: limit watering, plan herd move to ${altName} (${altDays==='stable'?'stable':altDays+' days left'}). Reply 1 if water is low.`;
+    ar=`تحذير: بئر ${w.def.name} قد يجف خلال ${dAr}.\nالإجراء: قللوا الاستهلاك وجهزوا نقل القطعان إلى ${altName}. أرسلوا 1 إذا كان الماء قليلًا.`;
+  }else if(t==='WATCH'){
+    en=`WATCH: ${w.def.name} is declining, ${dEn} left. No action yet. We will message again if it gets worse.`;
+    ar=`مراقبة: مستوى ${w.def.name} ينخفض، ${dAr}. لا إجراء الآن.`;
+  }else{
+    en=`OK: ${w.def.name} water level is safe (${dEn}).`;
+    ar=`جيد: مستوى مياه ${w.def.name} آمن.`;
+  }
+  if(r.conf.startsWith('Low')) en+='\n(Low data: please send a water report.)';
+  $('smsEn').textContent=en; $('smsAr').textContent=ar;
+  draw(w,r,t);
+}
+function draw(w,r,t){
+  const c=$('chart'),g=c.getContext('2d'),W=c.width,H=c.height,L=44,R=14,T=14,B=30;
+  g.clearRect(0,0,W,H);
+  const totalX=N+HORIZON+25, maxY=Math.max(7,...w.level)*1.05;
+  const X=x=>L+(x/(totalX-1))*(W-L-R), Y=y=>H-B-(y/maxY)*(H-T-B);
+  g.strokeStyle='#4a3a2b';g.fillStyle='#b9a88f';g.font='14px system-ui';g.lineWidth=1;
+  for(let v=0;v<=maxY;v+=2){g.beginPath();g.moveTo(L,Y(v));g.lineTo(W-R,Y(v));g.stroke();g.fillText(v+'m',6,Y(v)+4);}
+  // forecast band
+  g.fillStyle=t==='WARN'?'rgba(229,96,77,.25)':'rgba(232,176,74,.25)';
+  g.beginPath();
+  const x0=r.lastValid, xs=[];for(let x=x0;x<totalX;x+=1)xs.push(x);
+  xs.forEach((x,i)=>{const p=levelBand(r,x),y=Y(Math.max(0,p.mean+1.28*p.sd));i?g.lineTo(X(x),y):g.moveTo(X(x),y)});
+  xs.slice().reverse().forEach(x=>{const p=levelBand(r,x);g.lineTo(X(x),Y(Math.max(0,p.mean-1.28*p.sd)))});
+  g.closePath();g.fill();
+  // forecast mean
+  g.strokeStyle='#e8b04a';g.setLineDash([6,5]);g.lineWidth=2;g.beginPath();
+  xs.forEach((x,i)=>{const y=Y(Math.max(0,levelBand(r,x).mean));i?g.lineTo(X(x),y):g.moveTo(X(x),y)});g.stroke();g.setLineDash([]);
+  // history
+  g.strokeStyle='#f4e9d8';g.lineWidth=2;g.beginPath();
+  for(let i=0;i<=r.lastValid;i++){const y=Y(w.level[i]);i?g.lineTo(X(i),y):g.moveTo(X(i),y)}g.stroke();
+  if(r.opts.dead){g.fillStyle='#e5604d';g.font='bold 14px system-ui';g.fillText('sensor offline →',X(r.lastValid)-110,Y(w.level[r.lastValid])-12);}
+  // dry line + today
+  g.strokeStyle='#e5604d';g.lineWidth=1.5;g.beginPath();g.moveTo(L,Y(DRY));g.lineTo(W-R,Y(DRY));g.stroke();
+  g.fillStyle='#e5604d';g.font='13px system-ui';g.fillText('pump dry',W-R-62,Y(DRY)-5);
+  g.strokeStyle='#b9a88f';g.setLineDash([3,4]);g.beginPath();g.moveTo(X(TODAY),T);g.lineTo(X(TODAY),H-B);g.stroke();g.setLineDash([]);
+  g.fillStyle='#b9a88f';g.fillText('today',X(TODAY)-16,H-10);
+  g.fillText('+21d warn horizon',X(TODAY+HORIZON)-50,T+10);
+}
+$('deadSensor').onchange=render;$('cloudy').onchange=render;$('thr').oninput=render;
+$('report').onclick=()=>{ $('report').classList.toggle('on'); $('report').classList.toggle('off'); $('report').textContent=$('report').classList.contains('on')?'Herder report received ✓':'Herder SMS: "water is low"'; render();};
+render();
+</script>
+</body>
+</html>
